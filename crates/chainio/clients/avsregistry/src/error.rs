@@ -1,4 +1,4 @@
-use alloy_contract::Error as AlloyError;
+use alloy::contract::Error as AlloyError;
 use eigen_client_elcontracts::error::ElContractsError;
 use eigen_crypto_bls::error::BlsError;
 use thiserror::Error;
@@ -99,7 +99,7 @@ pub enum AvsRegistryError {
     GetAvsRegistry,
 
     /// Pubey registration msg hash
-    #[error("Failed to regiser pub key message hash")]
+    #[error("Failed to register pub key message hash")]
     PubKeyRegistrationMessageHash,
 
     /// Failed to calculate operator avs registration digest hash
@@ -149,6 +149,17 @@ pub enum AvsRegistryError {
     /// Invalid Quorum Numbers
     #[error("Invalid number of quorum numbers")]
     InvalidQuorumNums,
+
+    /// Invalid Private Key
+    #[error("Invalid private key")]
+    InvalidPrivateKey,
+
+    /// Invalid Signature
+    #[error("Invalid signature")]
+    InvalidSignature,
+    /// Parse BigInt
+    #[error("big int error")]
+    ParseBigIntError,
 }
 
 impl From<ElContractsError> for AvsRegistryError {

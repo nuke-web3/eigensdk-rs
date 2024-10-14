@@ -1,4 +1,4 @@
-name: Integration Tests
+name: Tests
 
 on:
   push:
@@ -7,17 +7,52 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: Run Integration Tests
+  build:
+    name: Build
     runs-on: ubuntu-latest
-    environment: testing
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.80.1
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo check
+        run: cargo check --workspace --all-features --all-targets
+
+  lint:
+    name: Run Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.80.1
+        with:
+            components: rustfmt, clippy
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-features --benches --examples --tests -- -D warnings
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
     env:
       HOLESKY_WS_URL: ${{ secrets.HOLESKY_WS_URL }}
       HOLESKY_HTTP_URL: ${{ secrets.HOLESKY_HTTP_URL }}
       FIREBLOCKS_API_KEY: ${{ secrets.FIREBLOCKS_API_KEY }}
       FIREBLOCKS_API_URL: ${{ secrets.FIREBLOCKS_API_URL }}
-
+      FIREBLOCKS_PRIVATE_KEY: ${{ secrets.FIREBLOCKS_PRIVATE_KEY }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,32 +61,37 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-        
+      
       - name: Create private key file
-        run: echo "${{ secrets.FIREBLOCKS_PRIVATE_KEY }}" > fireblocks_secret.key
-    
+        run: printf "%b" "$FIREBLOCKS_PRIVATE_KEY" > fireblocks_secret.key
+
       - name: Set environment variable for private key path
         run: echo "FIREBLOCKS_PRIVATE_KEY_PATH=$(pwd)/fireblocks_secret.key" >> $GITHUB_ENV
-        
+
       - name: Install nightly Rust
         run: rustup toolchain install nightly
-  
-      - name: Install rustfmt for nightly
-        run: rustup component add rustfmt --toolchain nightly
+
+      - name: Install testing tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: clippy
-        uses: dtolnay/rust-toolchain@clippy
-        
-      - name: Install Foundry
-        run: cargo install --git https://github.com/foundry-rs/foundry --profile release --locked forge cast chisel anvil
 
       - name: docker
         uses: docker-practice/actions-setup-docker@master
 
-      - name: Run make pr
-        run: make pr
+      - name: Run tests and generate code coverage
+        run: make coverage
 
+      - name: Zip coverage html report
+        run: zip -r coverage.zip lcov.info target/llvm-cov/html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summary
+          path: coverage.zip

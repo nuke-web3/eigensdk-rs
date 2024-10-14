@@ -6,7 +6,7 @@ use eigen_client_avsregistry::{error::AvsRegistryError, reader::AvsRegistryReade
 use eigen_crypto_bls::{BlsG1Point, PublicKey};
 use eigen_services_operatorsinfo::operator_info::OperatorInfoService;
 use eigen_types::operator::{OperatorAvsState, OperatorInfo, OperatorPubKeys, QuorumAvsState};
-use eigen_utils::binding::OperatorStateRetriever::CheckSignaturesIndices;
+use eigen_utils::operatorstateretriever::OperatorStateRetriever::CheckSignaturesIndices;
 use std::collections::HashMap;
 
 use crate::AvsRegistryService;
@@ -89,7 +89,12 @@ impl<R: AvsRegistryReader + Sync, S: OperatorInfoService + Sync> AvsRegistryServ
                 let mut pub_key_g1 = G1Projective::from(PublicKey::identity());
                 let mut total_stake: U256 = U256::from(0);
                 for operator in operators_avs_state.values() {
-                    if !operator.stake_per_quorum[quorum_num].is_zero() {
+                    if !operator
+                        .stake_per_quorum
+                        .get(quorum_num)
+                        .unwrap_or(&U256::ZERO)
+                        .is_zero()
+                    {
                         if let Some(pub_keys) = &operator.operator_info.pub_keys {
                             pub_key_g1 += pub_keys.g1_pub_key.g1();
                             total_stake += operator.stake_per_quorum[quorum_num];
@@ -132,6 +137,19 @@ impl<R: AvsRegistryReader + Sync, S: OperatorInfoService + Sync> AvsRegistryServ
 }
 
 impl<R: AvsRegistryReader, S: OperatorInfoService> AvsRegistryServiceChainCaller<R, S> {
+    /// Returns the operator info for the given operator id
+    ///
+    /// # Arguments
+    ///
+    /// * `operator_id` - The operator id
+    ///
+    /// # Returns
+    ///
+    /// The operator info
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if the operator info is not found or can not be retrieved
     async fn get_operator_info(
         &self,
         operator_id: [u8; 32],
@@ -151,24 +169,54 @@ mod tests {
     use std::collections::HashMap;
     use std::str::FromStr;
 
-    use crate::AvsRegistryService;
-
     use super::AvsRegistryServiceChainCaller;
+    use crate::AvsRegistryService;
     use alloy_primitives::{Address, FixedBytes, U256};
     use eigen_client_avsregistry::fake_reader::FakeAvsRegistryReader;
     use eigen_crypto_bls::BlsKeyPair;
     use eigen_services_operatorsinfo::fake_operator_info::FakeOperatorInfoService;
-    use eigen_types::operator::{OperatorAvsState, OperatorInfo, OperatorPubKeys, QuorumAvsState};
+    use eigen_testing_utils::test_data::TestData;
+    use eigen_types::operator::{
+        OperatorAvsState, OperatorInfo, OperatorPubKeys, QuorumAvsState, QuorumNum,
+    };
     use eigen_types::test::TestOperator;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug)]
+    struct InputOperatorInfo {
+        private_key_decimal: String,
+        operator_id: String,
+        operator_address: String,
+    }
+
+    #[derive(Deserialize, Debug)]
+    struct InputOperatorAvsState {
+        quorum_numbers: Vec<QuorumNum>,
+        block_num: u32,
+        private_key_decimal: String,
+        operator_id: String,
+        operator_address: String,
+    }
 
     const PRIVATE_KEY_DECIMAL: &str =
         "13710126902690889134622698668747132666439281256983827313388062967626731803599";
     const OPERATOR_ID: &str = "48beccce16ccdf8000c13d5af5f91c7c3dac6c47b339d993d229af1500dbe4a9";
     const OPERATOR_ADDRESS: &str = "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720";
-    fn build_test_operator() -> TestOperator {
-        let bls_keypair = BlsKeyPair::new(PRIVATE_KEY_DECIMAL.into()).unwrap();
+
+    /// Helper function to build a TestOperator given a private key and an operator id
+    ///
+    /// # Arguments
+    ///
+    /// * `private_key_decimal` - The private key of the operator in decimal format
+    /// * `operator_id` - The operator id
+    ///
+    /// # Returns
+    ///
+    /// The TestOperator element
+    fn build_test_operator(private_key_decimal: &str, operator_id: &str) -> TestOperator {
+        let bls_keypair = BlsKeyPair::new(private_key_decimal.into()).unwrap();
         let operator_id =
-            FixedBytes::<32>::from_slice(hex::decode(OPERATOR_ID).unwrap().as_slice());
+            FixedBytes::<32>::from_slice(hex::decode(operator_id).unwrap().as_slice());
         TestOperator {
             operator_id,
             bls_keypair: bls_keypair.clone(),
@@ -178,19 +226,33 @@ mod tests {
 
     fn build_avs_registry_service_chaincaller(
         test_operator: TestOperator,
+        operator_address: &str,
     ) -> AvsRegistryServiceChainCaller<FakeAvsRegistryReader, FakeOperatorInfoService> {
-        let operator_address = Address::from_str(OPERATOR_ADDRESS).unwrap();
+        let operator_address = Address::from_str(operator_address).unwrap();
         let avs_registry = FakeAvsRegistryReader::new(test_operator.clone(), operator_address);
         let operator_info_service = FakeOperatorInfoService::new(test_operator.bls_keypair.clone());
         AvsRegistryServiceChainCaller::new(avs_registry, operator_info_service)
     }
 
     #[tokio::test]
-    async fn test_get_operator_info() {
-        let test_operator = build_test_operator();
+    async fn test_get_operator_pubkeys() {
+        let default_input = InputOperatorInfo {
+            private_key_decimal: PRIVATE_KEY_DECIMAL.to_owned(),
+            operator_id: OPERATOR_ID.to_owned(),
+            operator_address: OPERATOR_ADDRESS.to_owned(),
+        };
+        let test_data: TestData<InputOperatorInfo> = TestData::new(default_input);
+
+        let test_operator = build_test_operator(
+            test_data.input.private_key_decimal.as_str(),
+            test_data.input.operator_id.as_str(),
+        );
         let bls_keypair = test_operator.bls_keypair.clone();
 
-        let service = build_avs_registry_service_chaincaller(test_operator.clone());
+        let service = build_avs_registry_service_chaincaller(
+            test_operator.clone(),
+            test_data.input.operator_address.as_str(),
+        );
         let operator_info = service
             .get_operator_info(test_operator.operator_id.into())
             .await
@@ -200,12 +262,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_operator_avs_state() {
-        let test_operator = build_test_operator();
-        let service = build_avs_registry_service_chaincaller(test_operator.clone());
+    async fn test_get_operators_avs_state() {
+        let default_input = InputOperatorAvsState {
+            quorum_numbers: vec![1],
+            block_num: 1,
+            private_key_decimal: PRIVATE_KEY_DECIMAL.to_owned(),
+            operator_id: OPERATOR_ID.to_owned(),
+            operator_address: OPERATOR_ADDRESS.to_owned(),
+        };
+        let test_data: TestData<InputOperatorAvsState> = TestData::new(default_input);
+
+        let test_operator = build_test_operator(
+            test_data.input.private_key_decimal.as_str(),
+            test_data.input.operator_id.as_str(),
+        );
+        let service = build_avs_registry_service_chaincaller(
+            test_operator.clone(),
+            test_data.input.operator_address.as_str(),
+        );
 
         let operator_avs_state = service
-            .get_operators_avs_state_at_block(1, &[1u8])
+            .get_operators_avs_state_at_block(
+                test_data.input.block_num,
+                &test_data.input.quorum_numbers,
+            )
             .await
             .unwrap();
 
@@ -215,7 +295,7 @@ mod tests {
                 pub_keys: Some(OperatorPubKeys::from(test_operator.bls_keypair)),
             },
             stake_per_quorum: test_operator.stake_per_quorum,
-            block_num: 1.into(),
+            block_num: test_data.input.block_num.into(),
         };
         let operator_state = operator_avs_state.get(&test_operator.operator_id).unwrap();
         assert_eq!(expected_operator_avs_state, *operator_state);
@@ -223,10 +303,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_quorum_avs_state() {
-        let test_operator = build_test_operator();
+        let test_operator = build_test_operator(PRIVATE_KEY_DECIMAL, OPERATOR_ID);
         let quorum_num = 1;
         let block_num = 1u32;
-        let service = build_avs_registry_service_chaincaller(test_operator.clone());
+        let service =
+            build_avs_registry_service_chaincaller(test_operator.clone(), OPERATOR_ADDRESS);
         let quorum_state_per_number = service
             .get_quorums_avs_state_at_block(&[quorum_num], 1)
             .await

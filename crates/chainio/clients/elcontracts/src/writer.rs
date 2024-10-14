@@ -8,16 +8,23 @@ use eigen_logging::tracing_logger::TracingLogger;
 pub use eigen_types::operator::Operator;
 use eigen_utils::binding::RewardsCoordinator::RewardsMerkleClaim;
 use eigen_utils::{
-    binding::{DelegationManager, StrategyManager, IERC20},
     get_signer,
+    {
+        delegationmanager::{
+            DelegationManager::{self},
+            IDelegationManager::OperatorDetails,
+        },
+        erc20::ERC20,
+        strategymanager::StrategyManager,
+    },
 };
 
 use tracing::info;
-use DelegationManager::OperatorDetails;
 
 /// Gas limit for registerAsOperator in [`DelegationManager`]
 pub const GAS_LIMIT_REGISTER_AS_OPERATOR_DELEGATION_MANAGER: u128 = 300000;
 
+/// Chain Writer to interact with EigenLayer contracts onchain
 #[derive(Debug, Clone)]
 pub struct ELChainWriter {
     delegation_manager: Address,
@@ -44,26 +51,36 @@ impl ELChainWriter {
         }
     }
 
+    /// Register an operator to EigenLayer
+    ///
+    /// # Arguments
+    ///
+    /// * `operator` - The operator to register
+    ///
+    /// # Returns
+    ///
+    /// * `FixedBytes<32>` - The transaction hash if successful, otherwise an error
+    ///
+    /// # Errors
+    ///
+    /// * `ElContractsError` - if the call to the contract fails
     pub async fn register_as_operator(
         &self,
         operator: Operator,
     ) -> Result<FixedBytes<32>, ElContractsError> {
-        info!(
-            "registering operator {:?} to EigenLayer",
-            operator.has_address()
-        );
+        info!("registering operator {:?} to EigenLayer", operator.address);
         let op_details = OperatorDetails {
-            earningsReceiver: operator.has_earnings_receiver_address(),
-            delegationApprover: operator.has_delegation_approver_address(),
-            stakerOptOutWindowBlocks: operator.has_staker_opt_out_window_blocks(),
+            __deprecated_earningsReceiver: operator.earnings_receiver_address,
+            delegationApprover: operator.delegation_approver_address,
+            stakerOptOutWindowBlocks: operator.staker_opt_out_window_blocks,
         };
-        let provider = get_signer(self.signer.clone(), &self.provider);
+        let provider = get_signer(&self.signer.clone(), &self.provider);
 
         let contract_delegation_manager = DelegationManager::new(self.delegation_manager, provider);
 
         let binding = {
             let contract_call = contract_delegation_manager
-                .registerAsOperator(op_details, operator.has_metadata_url().unwrap_or_default());
+                .registerAsOperator(op_details, operator.metadata_url.unwrap_or_default());
             contract_call.gas(300000)
         };
 
@@ -72,9 +89,10 @@ impl ELChainWriter {
             .await
             .map_err(ElContractsError::AlloyContractError)?;
 
-        let receipt = binding_tx.get_receipt().await.map_err(|e| {
-            ElContractsError::AlloyContractError(alloy_contract::Error::TransportError(e))
-        })?;
+        let receipt = binding_tx
+            .get_receipt()
+            .await
+            .map_err(ElContractsError::AlloyPendingTransactionError)?;
 
         let tx_status = receipt.status();
         let hash = receipt.transaction_hash;
@@ -86,20 +104,33 @@ impl ELChainWriter {
         Ok(hash)
     }
 
+    /// Update operator details on EigenLayer
+    ///
+    /// # Arguments
+    ///
+    /// * `operator` - The operator to update
+    ///
+    /// # Returns
+    ///
+    /// * `TxHash` - The transaction hash if successful, otherwise an error
+    ///
+    /// # Errors
+    ///
+    /// * `ElContractsError` - if the call to the contract fails
     pub async fn update_operator_details(
         &self,
         operator: Operator,
     ) -> Result<TxHash, ElContractsError> {
         info!(
             "updating operator detils of operator {:?} to EigenLayer",
-            operator.has_address()
+            operator.address
         );
         let operator_details = OperatorDetails {
-            earningsReceiver: operator.has_earnings_receiver_address(),
-            delegationApprover: operator.has_delegation_approver_address(),
-            stakerOptOutWindowBlocks: operator.has_staker_opt_out_window_blocks(),
+            __deprecated_earningsReceiver: operator.earnings_receiver_address,
+            delegationApprover: operator.delegation_approver_address,
+            stakerOptOutWindowBlocks: operator.staker_opt_out_window_blocks,
         };
-        let provider = get_signer(self.signer.clone(), &self.provider);
+        let provider = get_signer(&self.signer.clone(), &self.provider);
 
         let contract_delegation_manager = DelegationManager::new(self.delegation_manager, provider);
 
@@ -111,60 +142,58 @@ impl ELChainWriter {
             .await
             .map_err(ElContractsError::AlloyContractError)?;
 
-        info!(tx_hash = %modify_operator_tx.tx_hash(), operator = %operator.has_address(), "updated operator details tx");
+        info!(tx_hash = %modify_operator_tx.tx_hash(), operator = %operator.address, "updated operator details tx");
 
         let contract_call_update_metadata_uri = contract_delegation_manager
-            .updateOperatorMetadataURI(operator.has_metadata_url().unwrap_or_default());
+            .updateOperatorMetadataURI(operator.metadata_url.unwrap_or_default());
 
         let metadata_tx = contract_call_update_metadata_uri.send().await?;
 
         Ok(*metadata_tx.tx_hash())
     }
 
+    /// Deposit ERC20 tokens into a strategy on EigenLayer
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy_addr` - The address of the strategy to deposit into
+    /// * `amount` - The amount of tokens to deposit
+    ///
+    /// # Returns
+    ///
+    /// * `TxHash` - The transaction hash if successful, otherwise an error
+    ///
+    /// # Errors
+    ///
+    /// * `ElContractsError` - if the call to the contract fails
     pub async fn deposit_erc20_into_strategy(
         &self,
         strategy_addr: Address,
         amount: U256,
     ) -> Result<TxHash, ElContractsError> {
-        info!(
-            "depositing {:?} tokens into strategy {:?}",
-            amount, strategy_addr
-        );
-        let tokens_result = self
+        info!("depositing {amount:?} tokens into strategy {strategy_addr:?}");
+        let tokens = self
             .el_chain_reader
             .get_strategy_and_underlying_erc20_token(strategy_addr)
-            .await;
-        match tokens_result {
-            Ok(tokens) => {
-                let (_, underlying_token_contract, underlying_token) = tokens;
-                let provider = get_signer(self.signer.clone(), &self.provider);
+            .await?;
+        let (_, underlying_token_contract, underlying_token) = tokens;
+        let provider = get_signer(&self.signer.clone(), &self.provider);
 
-                let contract_underlying_token = IERC20::new(underlying_token_contract, &provider);
+        let contract_underlying_token = ERC20::new(underlying_token_contract, &provider);
 
-                let contract_call =
-                    contract_underlying_token.approve(self.strategy_manager, amount);
+        let contract_call = contract_underlying_token.approve(self.strategy_manager, amount);
 
-                let _approve = contract_call.send().await?;
+        let _approve = contract_call.send().await?;
 
-                let contract_strategy_manager =
-                    StrategyManager::new(self.strategy_manager, &provider);
+        let contract_strategy_manager = StrategyManager::new(self.strategy_manager, &provider);
 
-                let deposit_contract_call = contract_strategy_manager.depositIntoStrategy(
-                    strategy_addr,
-                    underlying_token,
-                    amount,
-                );
+        let deposit_contract_call =
+            contract_strategy_manager.depositIntoStrategy(strategy_addr, underlying_token, amount);
 
-                let tx = deposit_contract_call.send().await?;
+        let tx = deposit_contract_call.send().await?;
 
-                info!(
-                    "deposited {:?} tokens into strategy {:?}",
-                    amount, strategy_addr
-                );
-                Ok(*tx.tx_hash())
-            }
-            Err(e) => Err(e),
-        }
+        info!("deposited {amount:?} tokens into strategy {strategy_addr:?}");
+        Ok(*tx.tx_hash())
     }
 
     pub async fn set_claimed_for(
@@ -271,20 +300,26 @@ impl ELChainWriter {
 mod tests {
     use super::ELChainWriter;
     use crate::reader::ELChainReader;
+    use alloy::providers::Provider;
     use alloy_primitives::{Address, U256};
-    use alloy_provider::Provider;
     use alloy_signer_local::PrivateKeySigner;
-    use anvil_constants::{ANVIL_RPC_URL, CONTRACTS_REGISTRY};
+    use anvil_constants::CONTRACTS_REGISTRY;
     use eigen_logging::get_test_logger;
-    use eigen_testing_utils::anvil_constants::{
-        self, get_delegation_manager_address, get_erc20_mock_strategy, get_service_manager_address,
-        get_strategy_manager_address, ANVIL_HTTP_URL,
+    use eigen_testing_utils::{
+        anvil::start_anvil_container,
+        anvil_constants::{
+            self, get_delegation_manager_address, get_erc20_mock_strategy,
+            get_service_manager_address, get_strategy_manager_address,
+        },
     };
     use eigen_types::operator::Operator;
-    use eigen_utils::binding::{
-        mockAvsServiceManager,
-        ContractsRegistry::{self, get_test_valuesReturn},
-        DelegationManager,
+    use eigen_utils::{
+        get_provider,
+        {
+            contractsregistry::ContractsRegistry::{self, get_test_valuesReturn},
+            delegationmanager::DelegationManager,
+            mockavsservicemanager::MockAvsServiceManager,
+        },
     };
     use std::str::FromStr;
 
@@ -293,21 +328,22 @@ mod tests {
     /// # Returns
     ///
     /// A tuple containing an instance of ELChainWriter and the address of the delegation manager contract
-    async fn setup_el_chain_reader() -> (ELChainReader, Address) {
-        let delegation_manager_address = get_delegation_manager_address().await;
+    async fn setup_el_chain_reader(http_endpoint: String) -> (ELChainReader, Address) {
+        let delegation_manager_address =
+            get_delegation_manager_address(http_endpoint.clone()).await;
         let delegation_manager_contract = DelegationManager::new(
             delegation_manager_address,
-            anvil_constants::ANVIL_RPC_URL.clone(),
+            get_provider(http_endpoint.as_str()),
         );
         let slasher_address_return = delegation_manager_contract.slasher().call().await.unwrap();
         let DelegationManager::slasherReturn {
             _0: slasher_address,
         } = slasher_address_return;
 
-        let service_manager_address = get_service_manager_address().await;
-        let service_manager_contract = mockAvsServiceManager::new(
+        let service_manager_address = get_service_manager_address(http_endpoint.clone()).await;
+        let service_manager_contract = MockAvsServiceManager::new(
             service_manager_address,
-            anvil_constants::ANVIL_RPC_URL.clone(),
+            get_provider(http_endpoint.as_str()),
         );
         let avs_directory_address_return = service_manager_contract
             .avsDirectory()
@@ -315,7 +351,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mockAvsServiceManager::avsDirectoryReturn {
+        let MockAvsServiceManager::avsDirectoryReturn {
             _0: avs_directory_address,
         } = avs_directory_address_return;
 
@@ -325,7 +361,7 @@ mod tests {
                 slasher_address,
                 delegation_manager_address,
                 avs_directory_address,
-                ANVIL_HTTP_URL.to_string(),
+                http_endpoint,
             ),
             delegation_manager_address,
         )
@@ -333,14 +369,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_operator() {
-        let (el_chain_reader, _delegation_manager_address) = setup_el_chain_reader().await;
+        let (_container, http_endpoint, _ws_endpoint) = start_anvil_container().await;
+        let provider = get_provider(&http_endpoint);
+
+        let (el_chain_reader, _delegation_manager_address) =
+            setup_el_chain_reader(http_endpoint).await;
 
         let operator_pvt_key = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
         let operator: PrivateKeySigner = (operator_pvt_key)
             .parse()
             .expect("failed to generate wallet");
 
-        let contract_registry = ContractsRegistry::new(CONTRACTS_REGISTRY, ANVIL_RPC_URL.clone());
+        let contract_registry = ContractsRegistry::new(CONTRACTS_REGISTRY, provider);
         // Use these value in tests when needed
         let operator_index = "1".parse().unwrap();
         let get_test_values_return = contract_registry
@@ -364,18 +404,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_writer() {
-        let (el_chain_reader, _) = setup_el_chain_reader().await;
-        let http_endpoint = "http://localhost:8545".to_string();
+        let (_container, http_endpoint, _ws_endpoint) = start_anvil_container().await;
+        let provider = get_provider(&http_endpoint);
+
+        let (el_chain_reader, _) = setup_el_chain_reader(http_endpoint.clone()).await;
         let operator_addr = Address::from_str("90F79bf6EB2c4f870365E785982E1f101E93b906").unwrap();
         let operator_private_key =
             "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6".to_string();
-        let strategy_manager = get_strategy_manager_address().await;
+        let strategy_manager = get_strategy_manager_address(http_endpoint.clone()).await;
 
         let el_chain_writer = ELChainWriter::new(
             operator_addr,
             strategy_manager,
             el_chain_reader,
-            http_endpoint,
+            http_endpoint.clone(),
             operator_private_key,
         );
 
@@ -385,13 +427,13 @@ mod tests {
         )
         .expect("no key");
 
-        let operator = Operator::new(
-            wallet.address(),
-            wallet.address(),
-            wallet.address(),
-            3,
-            Some("eigensdk-rs".to_string()),
-        );
+        let operator = Operator {
+            address: wallet.address(),
+            earnings_receiver_address: wallet.address(),
+            delegation_approver_address: wallet.address(),
+            staker_opt_out_window_blocks: 3,
+            metadata_url: Some("eigensdk-rs".to_string()),
+        };
 
         // First test: register as an operator
         let tx_hash = el_chain_writer
@@ -401,10 +443,7 @@ mod tests {
 
         // this sleep is needed so that we wait for the tx to be processed
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let receipt = ANVIL_RPC_URL
-            .get_transaction_receipt(tx_hash)
-            .await
-            .unwrap();
+        let receipt = provider.get_transaction_receipt(tx_hash).await.unwrap();
         assert!(receipt.unwrap().status());
 
         let wallet_modified = PrivateKeySigner::from_str(
@@ -412,13 +451,13 @@ mod tests {
         )
         .expect("no key");
 
-        let operator_modified = Operator::new(
-            wallet_modified.address(),
-            wallet_modified.address(),
-            wallet_modified.address(),
-            3,
-            Some("eigensdk-rs".to_string()),
-        );
+        let operator_modified = Operator {
+            address: wallet_modified.address(),
+            earnings_receiver_address: wallet_modified.address(),
+            delegation_approver_address: wallet_modified.address(),
+            staker_opt_out_window_blocks: 3,
+            metadata_url: Some("eigensdk-rs".to_string()),
+        };
 
         // Second test: update operator details
         let tx_hash = el_chain_writer
@@ -428,15 +467,12 @@ mod tests {
 
         // this sleep is needed so that we wait for the tx to be processed
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let receipt = ANVIL_RPC_URL
-            .get_transaction_receipt(tx_hash)
-            .await
-            .unwrap();
+        let receipt = provider.get_transaction_receipt(tx_hash).await.unwrap();
         assert!(receipt.unwrap().status());
 
         // Third test: deposit_erc20_into_strategy
         let amount = U256::from_str("100").unwrap();
-        let strategy_addr = get_erc20_mock_strategy().await;
+        let strategy_addr = get_erc20_mock_strategy(http_endpoint).await;
         let tx_hash = el_chain_writer
             .deposit_erc20_into_strategy(strategy_addr, amount)
             .await
@@ -444,10 +480,7 @@ mod tests {
 
         // this sleep is needed so that we wait for the tx to be processed
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let receipt = ANVIL_RPC_URL
-            .get_transaction_receipt(tx_hash)
-            .await
-            .unwrap();
+        let receipt = provider.get_transaction_receipt(tx_hash).await.unwrap();
         assert!(receipt.unwrap().status());
     }
 }

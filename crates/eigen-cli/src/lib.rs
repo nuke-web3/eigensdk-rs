@@ -13,9 +13,9 @@ use eth_keystore::KeystoreError;
 use tokio::runtime::Runtime;
 
 use crate::eigen_address::ContractAddresses;
-use alloy_contract::Error as ContractError;
-use alloy_json_rpc::RpcError;
-use alloy_transport::TransportErrorKind;
+use alloy::contract::Error as ContractError;
+use alloy::transports::RpcError;
+use alloy::transports::TransportErrorKind;
 use args::{Commands, EigenKeyCommand};
 use ark_serialize::SerializationError;
 use bls::BlsKeystore;
@@ -194,13 +194,17 @@ mod test {
         generate::{KeyGenerator, DEFAULT_KEY_FOLDER, PASSWORD_FILE, PRIVATE_KEY_HEX_FILE},
         operator_id::derive_operator_id,
     };
+    use alloy_primitives::Address;
+    use eigen_testing_utils::anvil::start_anvil_container;
     use eigen_testing_utils::anvil_constants::{
-        get_registry_coordinator_address, get_service_manager_address, ANVIL_HTTP_URL,
+        get_registry_coordinator_address, get_service_manager_address,
     };
+    use eigen_testing_utils::test_data::TestData;
     use eth_keystore::decrypt_key;
     use k256::SecretKey;
     use rstest::rstest;
     use rust_bls_bn254::keystores::base_keystore::Keystore;
+    use serde::Deserialize;
     use std::fs;
     use tempfile::tempdir;
 
@@ -224,10 +228,7 @@ mod test {
 
         let keystore_instance = Keystore::from_file(output_path.to_str().unwrap()).unwrap();
         let decrypted_key = keystore_instance.decrypt("testpassword").unwrap();
-        let fr_key: String = decrypted_key
-            .iter()
-            .map(|&value| value as u8 as char)
-            .collect();
+        let fr_key: String = decrypted_key.iter().map(|&value| value as char).collect();
         assert_eq!(fr_key, key);
     }
 
@@ -273,35 +274,45 @@ mod test {
         assert_eq!(private_key, decrypted_key);
     }
 
-    #[tokio::test]
-    async fn test_egnaddrs_with_service_manager_flag() {
-        let service_manager_address = get_service_manager_address().await;
+    #[derive(Deserialize, Debug)]
+    struct Input {
+        service_manager_address: Address,
+        rpc_url: String,
+    }
 
-        let expected_addresses: ContractAddresses = serde_json::from_str(
-            r#"{
-            "avs": {
-              "bls-apk-registry": "0x84ea74d481ee0a5332c457a4d796187f6ba67feb",
-              "index-registry": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
-              "registry-coordinator": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
-              "service-manager": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
-              "stake-registry": "0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9"
-            },
-            "eigenlayer": {
-              "delegation-manager": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
-              "slasher": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
-              "strategy-manager": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
-            },
-            "network": {
-              "chain-id": "31337",
-              "rpc-url": "http://localhost:8545"
-            }
-          }"#,
-        )
+    #[tokio::test]
+    async fn test_egn_addrs_with_service_manager_flag() {
+        let (_container, http_endpoint, _ws_endpoint) = start_anvil_container().await;
+
+        let test_data = TestData::new(Input {
+            service_manager_address: get_service_manager_address(http_endpoint.clone()).await,
+            rpc_url: http_endpoint.clone(),
+        });
+        let expected_addresses: ContractAddresses = serde_json::from_str(&format!(
+            r#"{{
+                "avs": {{
+                    "bls-apk-registry": "0x84ea74d481ee0a5332c457a4d796187f6ba67feb",
+                    "index-registry": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
+                    "registry-coordinator": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
+                    "service-manager": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
+                    "stake-registry": "0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9"
+                }},
+                "eigenlayer": {{
+                    "delegation-manager": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+                    "slasher": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+                    "strategy-manager": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
+                }},
+                "network": {{
+                    "chain-id": "31337",
+                    "rpc-url": "{http_endpoint}"
+                }}
+            }}"#
+        ))
         .unwrap();
         let addresses = ContractAddresses::get_addresses(
-            Some(service_manager_address),
+            Some(test_data.input.service_manager_address),
             None,
-            ANVIL_HTTP_URL.into(),
+            test_data.input.rpc_url,
         )
         .await
         .unwrap();
@@ -310,35 +321,38 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_egnaddrs_with_registry_coordinator_flag() {
-        let registry_coordinator_address = get_registry_coordinator_address().await;
+    async fn test_egn_addrs_with_registry_coordinator_flag() {
+        let (_container, http_endpoint, _ws_endpoint) = start_anvil_container().await;
 
-        let expected_addresses: ContractAddresses = serde_json::from_str(
-            r#"{
-            "avs": {
-              "bls-apk-registry": "0x84ea74d481ee0a5332c457a4d796187f6ba67feb",
-              "index-registry": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
-              "registry-coordinator": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
-              "service-manager": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
-              "stake-registry": "0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9"
-            },
-            "eigenlayer": {
-              "delegation-manager": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
-              "slasher": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
-              "strategy-manager": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
-            },
-            "network": {
-              "chain-id": "31337",
-              "rpc-url": "http://localhost:8545"
-            }
-          }"#,
-        )
+        let registry_coordinator_address =
+            get_registry_coordinator_address(http_endpoint.clone()).await;
+
+        let expected_addresses: ContractAddresses = serde_json::from_str(&format!(
+            r#"{{
+                "avs": {{
+                    "bls-apk-registry": "0x84ea74d481ee0a5332c457a4d796187f6ba67feb",
+                    "index-registry": "0x9e545e3c0baab3e08cdfd552c960a1050f373042",
+                    "registry-coordinator": "0xc3e53f4d16ae77db1c982e75a937b9f60fe63690",
+                    "service-manager": "0x67d269191c92caf3cd7723f116c85e6e9bf55933",
+                    "stake-registry": "0xa82ff9afd8f496c3d6ac40e2a0f282e47488cfc9"
+                }},
+                "eigenlayer": {{
+                    "delegation-manager": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+                    "slasher": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+                    "strategy-manager": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"
+                }},
+                "network": {{
+                    "chain-id": "31337",
+                    "rpc-url": "{http_endpoint}"
+                }}
+            }}"#,
+        ))
         .unwrap();
 
         let addresses = ContractAddresses::get_addresses(
             None,
             Some(registry_coordinator_address),
-            ANVIL_HTTP_URL.into(),
+            http_endpoint,
         )
         .await
         .unwrap();
